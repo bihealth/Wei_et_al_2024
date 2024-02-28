@@ -1,0 +1,38 @@
+# execute at local: scvi folder
+
+import time
+
+data_folder = '../data'
+model_name = 'model' + time.strftime("_20%y%m%d_%H%M%S", time.localtime())
+use_gpu = True
+
+
+rule all:
+    input:
+        '1_test_gpu.txt',
+        model_name
+
+rule test_gpu:
+    output:'1_test_gpu.txt'
+    resources:
+        partition='gpu',
+        nvidia_gpu=1
+    shell:
+        '''python -c 'import torch; print(torch.cuda.is_available())' > {output}'''
+
+rule run_scvi:
+    input: 
+        os.path.join(data_folder, 'CB_epi_cells.h5')
+    output:
+        model = model_name
+    resources:
+        partition='gpu' if use_gpu else 'medium',
+        nvidia_gpu=int(use_gpu),
+        gres='gpu:tesla:1',
+        mem='168G',
+        time='2-23:00:00',
+        mem_mb=168000,
+        disk_mb=168000
+    notebook:
+        'scvi_model_training.ipynb'
+        
