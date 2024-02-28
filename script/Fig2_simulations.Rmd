@@ -1,0 +1,460 @@
+---
+title: "CCISM simulations"
+author: "Benedikt Obermayer"
+date: "2024/02/23"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, cache.lazy=FALSE, message=FALSE, warning=FALSE,dev=c('pdf'))
+knitr::knit_engines$set(python=reticulate::eng_python)
+Sys.setenv(RETICULATE_PYTHON='/home/obermayb_c/miniconda2/envs/CCISM/bin/python')
+library(reticulate)
+use_python("/home/obermayb_c/miniconda2/envs/CCISM/bin/python")
+use_condaenv("CCISM", conda = "/home/obermayb_c/miniconda2/condabin/conda")
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(igraph)
+library(Matrix)
+library(tidyr)
+library(mclust)
+library(ggpubr)
+library(cardelino)
+library(parallel)
+library(gtools)
+```
+
+```{r load_calls}
+get_cellSNP_output <- function(dir, prefix='') {
+  cells <- paste0(prefix,readLines(file.path(dir,'cellSNP.samples.tsv')))
+  SNPs <- read.table(file.path(dir,'cellSNP.base.vcf'),
+                     sep='\t',skip=1,header=1,as.is=TRUE,comment.char='') %>%
+    dplyr::mutate(SNP=paste0(X.CHROM,':',POS,REF,'>',ALT)) %>%
+    dplyr::pull(SNP)
+  A <- readMM(file.path(dir,'cellSNP.tag.AD.mtx'))
+  colnames(A) <- cells
+  rownames(A) <- SNPs
+  D <- readMM(file.path(dir,'cellSNP.tag.DP.mtx'))
+  colnames(D) <- cells
+  rownames(D) <- SNPs
+  list(A=A,D=D)
+}
+
+samples <- c(paste0('p0',c('07','08','13','14','16','20','21','26','35'),'t'),
+             'p009t1','p009t2')
+
+A.list <- list()
+D.list <- list()
+for (sample in samples) {
+  tmp <- get_cellSNP_output(file.path('..','..','zenodo_repository','cellSNP',sample),
+                            prefix='')
+  A.list[[sample]] <- tmp[['A']]
+  D.list[[sample]] <- tmp[['D']]
+}
+
+plot_theme = function(fontsize = 8){
+  plot_theme =  theme(title = element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
+                      axis.title = element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
+                      axis.text = element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
+                      strip.text.x = element_text(size = fontsize, family = "dajavu sans", colour='black'),
+                      strip.text.y = element_text(size = fontsize, family = "dajavu sans", colour='black'),
+                      legend.title =  element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
+                      legend.text=element_text(size=fontsize, family = "dajavu sans", colour = 'black'),
+                      text = element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
+                      plot.margin = margin(0,0,0,0,"cm")) 
+  plot_theme
+}
+```
+
+```{r define_benchmark}
+CCISM <- reticulate::import("CCISM")$CCISM
+
+simulate_A <- function(inputD,
+                       frac_tumor=.5,
+                       th=list(tumor=.4,normal=1.e-4),seed=NULL) {
+
+  tmp <- CCISM$simulate_A(as(inputD,'dgCMatrix'), frac_tumor, th[['tumor']], th[['normal']], as.integer(seed))
+  row.names(tmp[[1]]) <- row.names(inputD)
+  colnames(tmp[[1]]) <- colnames(inputD)
+
+  list(D=inputD,
+       A=tmp[[1]],
+       label=factor(tmp[[2]]))
+}
+
+run_CCISM <- function(A, D, min_counts, thetaT, thetaN) {
+  df <- data.frame(nSNPs_tot=colSums(D),
+                   row.names=colnames(D))
+  df$p <- NA
+  take_SNPs <- rowSums(D) > 0
+  take_cells <- colSums(D) >= min_counts
+  if ((sum(take_SNPs) > 0) & (sum(take_cells) > 0) & (sum(A[take_SNPs,take_cells]) > 0)) {
+    res <- CCISM$EMoptimize(as(A[take_SNPs,take_cells,drop=FALSE], "CsparseMatrix"),
+                              as(D[take_SNPs,take_cells,drop=FALSE], "CsparseMatrix"), thetaT, thetaN, 0)
+    df[take_cells,'p'] <- res[['p']]
+  }
+  df$est_thetaN <- res$thetaN
+  df$est_thetaT <- res$thetaT
+  df
+}
+
+run_vireo <- function(A, D, min_counts) {
+  df <- data.frame(nSNPs_tot=colSums(D),
+                   row.names=colnames(D))
+  df$p <- NA
+  take_SNPs <- rowSums(D) > 0
+  take_cells <- colSums(D) >= min_counts
+  if ((sum(take_SNPs) > 0) & (sum(take_cells) > 0) & (sum(A[take_SNPs,take_cells]) > 0)) {
+    res <- CCISM$vireo_optimize(as(A[take_SNPs,take_cells,drop=FALSE], "CsparseMatrix"),
+                                  as(D[take_SNPs,take_cells,drop=FALSE], "CsparseMatrix"), 0)
+    df[take_cells,'p'] <- res[['p']]
+  }
+  df$est_thetaN <- NA
+  df$est_thetaT <- NA
+  df
+}
+
+run_cardelino <- function(A, D, min_counts) {
+  df <- data.frame(nSNPs_tot=colSums(D),
+                   row.names=colnames(D))
+  df$p <- NA
+  take_SNPs <- rowSums(D) > 0
+  take_cells <- colSums(D) >= min_counts
+  if ((sum(take_SNPs) > 0) & (sum(take_cells) > 0) & (sum(A[take_SNPs,take_cells]) > 0)) {
+    Z <- data.frame('tumor'=rep(TRUE,sum(take_SNPs)),
+                    'normal'=rep(FALSE,sum(take_SNPs)),
+                    row.names=row.names(A[take_SNPs,]))
+    card <- clone_id(A[take_SNPs,take_cells,drop=FALSE],
+                     D[take_SNPs,take_cells,drop=FALSE], 
+                     Config=as.matrix(Z), verbose=FALSE, inference='EM')
+    df[take_cells,'p'] <- card$prob[,'tumor']
+  }
+  df$est_thetaN <- card$theta[1]
+  df$est_thetaT <- card$theta[2]
+  df
+}
+```
+
+```{r run_simulations}
+res <- list()
+k <- 1
+thetaT <- .4
+for (frac_tumor in seq(.2,.9,.1)) { 
+  for (rep in seq(1,5)) { 
+    message(paste0('frac_tumor: ',frac_tumor,', rep:',rep))
+    tmp <- mclapply(D.list, function(D) simulate_A(D,frac_tumor=frac_tumor,
+                                                   th=list(tumor=thetaT,normal=1.e-4),seed=rep),
+                    mc.cores=4)
+    res[[k]] <- do.call(rbind,
+                        mclapply(names(tmp), function(x) {
+                          start_time <- Sys.time() 
+                          xx <- run_CCISM(tmp[[x]]$A, tmp[[x]]$D, 1, .5, .01) 
+                          end_time <- Sys.time() 
+                          xx %>%
+                            dplyr::mutate(sample=x,
+                                          frac_tumor=frac_tumor,
+                                          rep=rep,
+                                          tool='CCISM',
+                                          label=tmp[[x]]$label,
+                                          time=as.numeric(end_time-start_time))
+                        }, mc.cores=4))
+    res[[k+1]] <- do.call(rbind,
+                          mclapply(names(tmp), function(x) {
+                            start_time <- Sys.time()
+                            xx <- run_vireo(tmp[[x]]$A, tmp[[x]]$D, 1)
+                            end_time <- Sys.time()
+                            xx %>%
+                              dplyr::mutate(sample=x,
+                                            frac_tumor=frac_tumor,
+                                            rep=rep,
+                                            tool='vireo',
+                                            label=tmp[[x]]$label,
+                                            time=as.numeric(end_time-start_time))
+                          }, mc.cores=4))
+    res[[k+2]] <- do.call(rbind,
+                          mclapply(names(tmp), function(x) {
+                            start_time <- Sys.time()
+                            xx <- run_cardelino(tmp[[x]]$A, tmp[[x]]$D, 1) 
+                            end_time <- Sys.time()
+                            xx %>%
+                              dplyr::mutate(sample=x,
+                                            frac_tumor=frac_tumor,
+                                            rep=rep,
+                                            tool='cardelino',
+                                            label=tmp[[x]]$label,
+                                            time=as.numeric(end_time-start_time))
+                          }, mc.cores=4))
+    k <- k+3
+  }
+}
+  
+results <- do.call(rbind,res)
+
+write.csv(results,'Fig2_simulation_results.csv')
+```
+
+```{r stats}
+library(RColorBrewer)
+library(egg)
+
+results <- read.csv('Fig2_simulation_results.csv',header=1,row.names=1) %>%
+  dplyr::mutate(tool=factor(gsub('cardelino','cardelinoEM',tool),levels=c('CCISM','cardelinoEM','vireo')))
+stats <- results %>%
+  dplyr::mutate(donor=gsub('[nt][12]*','',sample)) %>%
+  dplyr::mutate(call=ifelse(!is.na(p) & (p > .5),'tumor','normal'),
+                label=ifelse(as.logical(label),'tumor','normal')) %>%
+  dplyr::group_by(sample,donor,frac_tumor,rep,tool) %>%
+  dplyr::summarise(TP=sum((call=='tumor') & (label=='tumor'),na.rm=TRUE),
+                   FP=sum((call=='tumor') & (label=='normal'),na.rm=TRUE),
+                   TN=sum((call=='normal') & (label=='normal'),na.rm=TRUE),
+                   FN=sum((call=='normal') & (label=='tumor'),na.rm=TRUE),
+                   time=mean(time)) %>%
+  dplyr::mutate(FPR=FP/(FP+TN),
+                TPR=TP/(TP+FN))
+
+donors <- unique(stats$donor)
+
+donor_colors <- setNames(brewer.pal(length(donors),'Paired'),gsub('p0','P',donors))
+
+tool_colors <- c('CCISM'='forestgreen','vireo'='yellow3','cardelinoEM'='orange3')
+```
+
+performance
+
+```{r performance,fig.width=3.,fig.height=2.5}
+pl <- lapply(c('FPR','TPR','runtime'), function(x)
+  stats %>% 
+    dplyr::mutate(runtime=time) %>%
+    dplyr::ungroup() %>%
+    ggplot(aes_string(x='tool',y=x,fill='tool')) +
+    geom_boxplot(position=position_dodge(width=.8),width=.6,outlier.shape=NA) +
+    theme_bw() + 
+    theme(legend.position='none',
+          axis.text.x=element_text(angle=60,hjust=1,vjust=1),
+          plot.margin = unit(c(0, 0, 0, 0), "cm")) +
+    scale_fill_manual(values=tool_colors) +
+    labs(x='',title=x,y='') + 
+    plot_theme())
+
+plot_grid(plotlist=list(pl[[1]],pl[[2]],pl[[3]] + scale_y_log10()), 
+          ncol=3, align='vh')
+```
+
+check dependence on frac_tumor 
+
+```{r compare_frac_tumor,fig.width=3.5,fig.height=2.}
+ggplot(stats %>% 
+         dplyr::ungroup() %>%
+         dplyr::select(frac_tumor,tool,FPR,TPR) %>%
+         gather(metric,value,-c(frac_tumor,tool)) %>%
+         dplyr::group_by(frac_tumor,tool,metric) %>%
+         dplyr::summarise(mean=mean(value,na.rm=TRUE),
+                          se=sd(value,na.rm=TRUE)/sqrt(n())),
+       aes(x=frac_tumor,y=mean,ymin=mean-se,ymax=mean+se,color=tool)) +
+  geom_line(aes(group=tool),size=.5) +
+  geom_pointrange(aes(shape=tool),fatten=4,alpha=.5) +
+  theme_bw() + 
+  facet_wrap(~metric,ncol=2,switch='y') + #,scales='free') +
+  scale_color_manual(values=tool_colors) +
+  scale_shape_manual(values=c(1,3,4),guide=FALSE) +
+  guides(color=guide_legend(override.aes=list(shape=c(1,3,4)))) +
+  labs(x='tumor fraction',y='',color='') +
+  theme(legend.position=c(.78,.2),
+        legend.margin=unit(0,'mm'),
+        legend.title=element_blank(),
+        strip.background = element_rect(color = "black", fill=NA, size = 0),
+        legend.key.size=unit(3,'mm'),
+        strip.placement='outside')  +
+  plot_theme()
+```
+
+```{r stats_by_nSNPs,fig.width=3.5,fig.height=2}
+stats_by_nSNPs <- results %>%
+  dplyr::mutate(nSNPs_tot=cut(nSNPs_tot,c(-1,0,1,2,3,10000),labels=c(0,1,2,3,'>3'),include.lowest=TRUE)) %>%
+  dplyr::group_by(sample,nSNPs_tot,frac_tumor,rep,tool) %>%  
+  dplyr::mutate(call=ifelse(!is.na(p) & (p > .5),'tumor','normal'),
+                label=ifelse(as.logical(label),'tumor','normal')) %>%
+  dplyr::summarise(TP=sum((call=='tumor') & (label=='tumor'),na.rm=TRUE),
+                   FP=sum((call=='tumor') & (label=='normal'),na.rm=TRUE),
+                   TN=sum((call=='normal') & (label=='normal'),na.rm=TRUE),
+                   FN=sum((call=='normal') & (label=='tumor'),na.rm=TRUE)) %>%
+  dplyr::mutate(FPR=FP/(FP+TN),
+                TPR=TP/(TP+FN))
+  
+ggplot(stats_by_nSNPs %>%
+         dplyr::mutate(donor=gsub('t[12]*$','',sample)) %>%
+         dplyr::select(-c(TP,FP,TN,FN)) %>%
+         gather(metric,value,-c(donor,nSNPs_tot,frac_tumor,sample,rep,tool)) %>%
+         dplyr::group_by(nSNPs_tot,metric,tool) %>%
+         dplyr::summarise(mean=mean(value,na.rm=TRUE),
+                          se=sd(value,na.rm=TRUE)/sqrt(n())) %>%
+         dplyr::filter(tool=='CCISM'),
+       aes(x=nSNPs_tot,y=mean,ymin=mean-se,ymax=mean+se,color=tool)) + 
+  geom_line(aes(group=tool),size=.5) +
+  geom_pointrange(aes(shape=tool),fatten=5,alpha=.5) +
+  facet_wrap(~metric,ncol=2,switch='y') +
+  scale_color_manual(values=tool_colors) +
+  labs(x='mean # SNVs expressed / cell',y='',fill='',color='',shape='') +
+  theme_bw() +
+  theme(legend.position='none',
+        legend.margin=unit(0,'mm'),
+        legend.title=element_blank(),
+        strip.background = element_rect(color = "black", fill=NA, size = 0),
+        legend.key.size=unit(3,'mm'),
+        strip.placement='outside') +
+  plot_theme()
+```
+
+```{r dataset_stats,fig.width=4,fig.height=3.5}
+library(ggpubr)
+# statistics on number of cells, total number of reads and mitochondrial reads derived from bam files
+mito_fraction <- 'sample   ncells  total   mito
+p007n   1177    184945934       79323177
+p007t   1450    136970642       33555196
+p008n   1086    200646765       78176181
+p008t   695     149803413       33273405
+p009n1  2803    220252457       76150649
+p009n2  4169    269516540       86884306
+p009t1  3016    303907866       70802986
+p009t2  2939    293744398       54816472
+p013n   1823    91076301        35990361
+p013t   1828    157094509       26441692
+p014n   2572    198361475       68434824
+p014t   1816    185911112       45072742
+p016n   3337    192613273       56219217
+p016t   1503    203371623       38232139
+p020n   2107    122603691       39780454
+p020t   1325    166118777       25879507
+p021n   2471    183074042       66372613
+p021t   342     66204346        11930544
+p026t   1178    86617500        18221950
+p035t   1531    192599285       43134909'
+depth <- read.csv(text=mito_fraction,sep="",header=1) %>%
+  dplyr::mutate(mean_reads=total/ncells/1.e3) 
+
+# get number of somatic variants using the script `get_num_variants.sh`
+num_variants <- read.csv('num_variants.txt',sep='',header=1) %>%
+  dplyr::mutate(variants_per_MB=nvars/3100.)  %>%
+  dplyr::select(-nvars)
+
+dataset_stats <- lapply(names(D.list), function(x) data.frame(mean_nSNVs_tot=mean(colSums(D.list[[x]] > 0)),
+                                                              fraction_uninformative=mean(colSums(D.list[[x]] > 0)==0),
+                                                              sample=x)) %>%
+  do.call(rbind,.) %>%
+  dplyr::mutate(donor=gsub('t[12]*$','',sample)) %>%
+  dplyr::left_join(depth,by='sample') 
+
+var_names <- c('fraction_uninformative'='fraction cells without SNVs',
+               'mean_nSNVs_tot'='mean # expressed SNVs',
+               'mean_reads'='mean # reads / 1e3',
+               'variants_per_MB'='# SNVs / MB')
+tmp <- dplyr::left_join(stats %>%   
+                   dplyr::group_by(donor,sample,frac_tumor,tool) %>%
+                   dplyr::summarise_if(is.numeric,mean) %>%
+                   dplyr::ungroup() %>%
+                   dplyr::filter(frac_tumor==.5,tool=='CCISM') %>%
+                   dplyr::select(-c(TP,FP,TN,FN,frac_tumor,rep,tool)),
+                 dataset_stats %>%
+                   dplyr::left_join(num_variants,by=c('donor')),
+                 by=c('donor','sample')) 
+
+tmp %>% 
+  gather(variable,value,c(mean_nSNVs_tot,fraction_uninformative,mean_reads,variants_per_MB)) %>%
+  dplyr::mutate(variable=factor(plyr::revalue(variable,var_names),
+                                levels=c('# SNVs / MB',
+                                         'fraction cells without SNVs',
+                                         'mean # expressed SNVs',
+                                         'mean # reads / 1e3')),
+                donor=gsub('p0','P',donor)) %>%
+  ggplot(aes(x=as.numeric(value),y=TPR)) + 
+  geom_point(aes(fill=donor),pch=21,size=2,alpha=.75) +
+  facet_wrap(~variable,ncol=2,scales='free_x',strip.position = "bottom") +
+  theme_bw() + 
+  guides(fill=guide_legend(override.aes=list(pch=21,stroke=.5,size=3))) +
+  theme(legend.key.size=unit(3,'mm'),
+        legend.title=element_blank(),
+        strip.background = element_rect(color = "black", fill=NA, size = 0),
+        legend.position='none',
+        strip.placement = "outside") +
+  scale_fill_manual(values=donor_colors) +
+  stat_cor(aes(label = ..r.label..), method = "spearman", label.x.npc=.5, label.y.npc=.4,  size=3) +
+  labs(x='',color='',shape='',fill='',y='TPR') +
+  plot_theme()
+```
+
+dependence # expressed SNVs on # of variants
+
+```{r dataset_stats_2, fig.height=2.5, fig.width=3.5}
+ggplot(tmp %>% dplyr::mutate(donor=gsub('p0','P',donor)), 
+       aes(x=variants_per_MB,y=mean_nSNVs_tot)) +
+  geom_point(aes(fill=donor),size=2,alpha=.75,pch=21) +
+  theme_bw() + 
+  theme(legend.key.size=unit(3,'mm'),
+        legend.title=element_blank(),
+        legend.margin=unit(3,'mm'),
+        legend.position='right',
+        legend.box='vertical') +
+  scale_fill_manual(values=donor_colors) +
+  guides(fill=guide_legend(override.aes=list(pch=21,stroke=.5,size=3),ncol=1)) +
+  labs(x='SNVs / MB', y='mean # expressed SNVs / cell', color='',shape='',fill='') + 
+  plot_theme()
+```
+
+check subsampling
+
+```{r subsampling,fig.width=3.75,fig.height=3.5}
+power.files <- list()
+for (sample in samples) {
+  for (frac in c('_05','_1','_2','_5','')) {
+    power <- list()
+    for (samp in paste0(sample,c('','1','2'),frac)) {
+      power_file <- file.path('..','..','zenodo_repository','CCISM',samp,'power_estimates.txt')
+      if (file.exists(power_file)) { 
+        power[[samp]] <- read.table(power_file,header=1,sep='\t') %>%
+          dplyr::mutate(frac=ifelse(frac=='',1,as.numeric(paste0("0.",gsub('_','',frac)))),
+                        donor=gsub('[nt]+[0-9]*$','',sample),
+                        sample=samp)
+      }
+    }
+    if (length(power) > 0) {
+      power.files[[paste0(sample,'_',frac)]] <- do.call(rbind,power)
+    }
+  }
+}
+
+power <- do.call(rbind,power.files) %>%
+  dplyr::group_by(sample,frac,donor) %>%
+  dplyr::summarise(est_TPR=mean(TPR),
+                   est_FPR=mean(FPR)) %>%
+  dplyr::mutate(sample=gsub('_.*','',sample))
+
+dplyr::left_join(power,dataset_stats,by=c('donor','sample')) %>%
+  dplyr::mutate(mean_reads=mean_reads*as.numeric(frac),
+                donor=gsub('p0','P',donor)) %>%
+  ggplot(aes(x=mean_reads,y=est_TPR)) + 
+  geom_point(aes(fill=donor,size=ifelse(frac==1,'real','subsampled')),alpha=.75,pch=21) +
+  geom_line(aes(color=donor,group=sample),size=.5,alpha=.5) +
+  theme_bw() + 
+  guides(fill=guide_legend(override.aes=list(pch=21,stroke=.5,size=3),ncol=1)) +
+  theme(legend.key.size=unit(3,'mm'),
+        legend.title=element_blank(),
+        strip.background = element_rect(color = "black", fill=NA, size = 0),
+        legend.position=c(.87,.25),
+        strip.placement = "outside") +
+  scale_fill_manual(values=donor_colors) +
+  scale_size_manual(values=c('real'=2,'subsampled'=1),guide=NULL) +
+  scale_color_manual(values=donor_colors) +
+  scale_x_log10() +
+  #stat_cor(aes(label = ..r.label..), method = "spearman", label.x.npc=.8, label.y.npc=.98,  size=4) +
+  labs(x='mean # reads / cell',color='',shape='',fill='',y='estimated TPR') +
+  plot_theme()
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
