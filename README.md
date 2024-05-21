@@ -52,12 +52,13 @@ and should be unpacked into a directory structure like so (named ./data/):
     - output: {sample}_cellbender_counts.h5
 
 ### Preprocessing
-#### Integrate all samples from CellBender output and filter for QC parameters (1_preprocessing_h5.ipynb)
+#### Integrate all samples from CellBender output and filter for QC parameters
 #### Cell type annotation (coarse, epithelial cells vs immune cells vs stromal cells)
-- input: all cellbender_counts.h5 object
-- output: 
-    - CB_all_cells.h5 and CB_epi_cells.h5 that contains high-quality all/epithelial cells with calculated PCA, UMAP, diffusion map, and louvain embeddings, as well as coarse cell type annotation
-    - anno/{sample}_{cell_type}.txt cell barcode list by sample and cell type
+- run `1_preprocessing_h5.ipynb`
+    - input: all cellbender_counts.h5 object
+    - output: 
+        - CB_all_cells.h5 and CB_epi_cells.h5 that contains high-quality all/epithelial cells with calculated PCA, UMAP, diffusion map, and louvain embeddings, as well as coarse cell type annotation
+        - anno/{sample}_{cell_type}.txt cell barcode list by sample and cell type
 
 ### Identification of cancer cells
 #### inferCNV: infer copy number alteration status from gene expression

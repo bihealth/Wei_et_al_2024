@@ -58,14 +58,14 @@ for (sample in samples) {
 }
 
 plot_theme = function(fontsize = 8){
-  plot_theme =  theme(title = element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
-                      axis.title = element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
-                      axis.text = element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
-                      strip.text.x = element_text(size = fontsize, family = "dajavu sans", colour='black'),
-                      strip.text.y = element_text(size = fontsize, family = "dajavu sans", colour='black'),
-                      legend.title =  element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
-                      legend.text=element_text(size=fontsize, family = "dajavu sans", colour = 'black'),
-                      text = element_text(size = fontsize, family = "dajavu sans", colour = 'black'),
+  plot_theme =  theme(title = element_text(size = fontsize, family = "sans", colour = 'black'),
+                      axis.title = element_text(size = fontsize, family = "sans", colour = 'black'),
+                      axis.text = element_text(size = fontsize, family = "sans", colour = 'black'),
+                      strip.text.x = element_text(size = fontsize, family = "sans", colour='black'),
+                      strip.text.y = element_text(size = fontsize, family = "sans", colour='black'),
+                      legend.title =  element_text(size = fontsize, family = "sans", colour = 'black'),
+                      legend.text=element_text(size=fontsize, family = "sans", colour = 'black'),
+                      text = element_text(size = fontsize, family = "sans", colour = 'black'),
                       plot.margin = margin(0,0,0,0,"cm")) 
   plot_theme
 }
@@ -141,61 +141,62 @@ run_cardelino <- function(A, D, min_counts) {
 ```
 
 ```{r run_simulations}
-res <- list()
-k <- 1
-thetaT <- .4
-for (frac_tumor in seq(.2,.9,.1)) { 
-  for (rep in seq(1,5)) { 
-    message(paste0('frac_tumor: ',frac_tumor,', rep:',rep))
-    tmp <- mclapply(D.list, function(D) simulate_A(D,frac_tumor=frac_tumor,
-                                                   th=list(tumor=thetaT,normal=1.e-4),seed=rep),
-                    mc.cores=4)
-    res[[k]] <- do.call(rbind,
-                        mclapply(names(tmp), function(x) {
-                          start_time <- Sys.time() 
-                          xx <- run_CCISM(tmp[[x]]$A, tmp[[x]]$D, 1, .5, .01) 
-                          end_time <- Sys.time() 
-                          xx %>%
-                            dplyr::mutate(sample=x,
-                                          frac_tumor=frac_tumor,
-                                          rep=rep,
-                                          tool='CCISM',
-                                          label=tmp[[x]]$label,
-                                          time=as.numeric(end_time-start_time))
-                        }, mc.cores=4))
-    res[[k+1]] <- do.call(rbind,
+if (!file.exists('Fig2_simulation_results.csv')) {
+  res <- list()
+  k <- 1
+  thetaT <- .4
+  for (frac_tumor in seq(.2,.9,.1)) { 
+    for (rep in seq(1,5)) { 
+      message(paste0('frac_tumor: ',frac_tumor,', rep:',rep))
+      tmp <- mclapply(D.list, function(D) simulate_A(D,frac_tumor=frac_tumor,
+                                                     th=list(tumor=thetaT,normal=1.e-4),seed=rep),
+                      mc.cores=4)
+      res[[k]] <- do.call(rbind,
                           mclapply(names(tmp), function(x) {
-                            start_time <- Sys.time()
-                            xx <- run_vireo(tmp[[x]]$A, tmp[[x]]$D, 1)
-                            end_time <- Sys.time()
+                            start_time <- Sys.time() 
+                            xx <- run_CCISM(tmp[[x]]$A, tmp[[x]]$D, 1, .5, .01) 
+                            end_time <- Sys.time() 
                             xx %>%
                               dplyr::mutate(sample=x,
                                             frac_tumor=frac_tumor,
                                             rep=rep,
-                                            tool='vireo',
+                                            tool='CCISM',
                                             label=tmp[[x]]$label,
                                             time=as.numeric(end_time-start_time))
                           }, mc.cores=4))
-    res[[k+2]] <- do.call(rbind,
-                          mclapply(names(tmp), function(x) {
-                            start_time <- Sys.time()
-                            xx <- run_cardelino(tmp[[x]]$A, tmp[[x]]$D, 1) 
-                            end_time <- Sys.time()
-                            xx %>%
-                              dplyr::mutate(sample=x,
-                                            frac_tumor=frac_tumor,
-                                            rep=rep,
-                                            tool='cardelino',
-                                            label=tmp[[x]]$label,
-                                            time=as.numeric(end_time-start_time))
-                          }, mc.cores=4))
-    k <- k+3
+      res[[k+1]] <- do.call(rbind,
+                            mclapply(names(tmp), function(x) {
+                              start_time <- Sys.time()
+                              xx <- run_vireo(tmp[[x]]$A, tmp[[x]]$D, 1)
+                              end_time <- Sys.time()
+                              xx %>%
+                                dplyr::mutate(sample=x,
+                                              frac_tumor=frac_tumor,
+                                              rep=rep,
+                                              tool='vireo',
+                                              label=tmp[[x]]$label,
+                                              time=as.numeric(end_time-start_time))
+                            }, mc.cores=4))
+      res[[k+2]] <- do.call(rbind,
+                            mclapply(names(tmp), function(x) {
+                              start_time <- Sys.time()
+                              xx <- run_cardelino(tmp[[x]]$A, tmp[[x]]$D, 1) 
+                              end_time <- Sys.time()
+                              xx %>%
+                                dplyr::mutate(sample=x,
+                                              frac_tumor=frac_tumor,
+                                              rep=rep,
+                                              tool='cardelino',
+                                              label=tmp[[x]]$label,
+                                              time=as.numeric(end_time-start_time))
+                            }, mc.cores=4))
+      k <- k+3
+    }
   }
-}
   
-results <- do.call(rbind,res)
-
-write.csv(results,'Fig2_simulation_results.csv')
+  results <- do.call(rbind,res)
+  write.csv(results,'Fig2_simulation_results.csv')
+}
 ```
 
 ```{r stats}
@@ -238,11 +239,11 @@ pl <- lapply(c('FPR','TPR','runtime'), function(x)
           axis.text.x=element_text(angle=60,hjust=1,vjust=1),
           plot.margin = unit(c(0, 0, 0, 0), "cm")) +
     scale_fill_manual(values=tool_colors) +
-    labs(x='',title=x,y='') + 
+    labs(x='',title='',y=x) + 
     plot_theme())
 
-plot_grid(plotlist=list(pl[[1]],pl[[2]],pl[[3]] + scale_y_log10()), 
-          ncol=3, align='vh')
+plot_grid(plotlist=list(pl[[1]], pl[[2]], pl[[3]] + scale_y_log10()), 
+          ncol=3, align='vh', scale=.9)
 ```
 
 check dependence on frac_tumor 

@@ -1,0 +1,264 @@
+---
+title: "LUNG data"
+author: "Benedikt Obermayer"
+date: "2024/05/16"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, cache.lazy=FALSE, message=FALSE, warning=FALSE,
+                      dev=c('svg'))
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(igraph)
+library(tidyr)
+library(Matrix)
+library(ggrepel)
+library(Seurat)
+library(RColorBrewer)
+
+plot_theme = function(fontsize = 8){
+  plot_theme =  theme(title = element_text(size = fontsize, family = "sans", colour = 'black'),
+                      axis.title = element_text(size = fontsize, family = "sans", colour = 'black'),
+                      axis.text = element_text(size = fontsize, family = "sans", colour = 'black'),
+                      strip.text.x = element_text(size = fontsize, family = "sans", colour='black'),
+                      strip.text.y = element_text(size = fontsize, family = "sans", colour='black'),
+                      legend.title =  element_text(size = fontsize, family = "sans", colour = 'black'),
+                      legend.text=element_text(size=fontsize, family = "sans", colour = 'black'),
+                      text = element_text(size = fontsize, family = "sans", colour = 'black'),
+                      plot.margin = margin(0,0,0,0,"cm")) 
+  plot_theme
+}
+```
+
+get CCISM calls 
+
+```{r get_data_ccism}
+path <- '/data/cephfs-2/unmirrored/projects/sccrc-patients/scitcem/datasets'
+cell.calls <- list()
+power.files <- list()
+param.files <- list()
+donors <- c('p027','p030','p031','p032','p033','p034')
+
+for (donor in donors) {
+  for (sample in paste0(donor,c('n','t'))) {
+    calls <- list()
+    power <- list()
+    param <- list()
+    call_file <- file.path(path,'scitcem','WGS','LUNG','3p',sample,'results.txt')
+    if (file.exists(call_file)) {
+      cell.calls[[sample]] <- read.csv(call_file,header=1,sep='\t',row.names=1) %>%
+        tibble::rownames_to_column('cell') %>%
+        dplyr::mutate(cell_id=paste0(sample,'_',cell),
+                      sample=sample,
+                      call=ifelse(is.na(p),'normal',ifelse(p > .5, 'tumor','normal')))
+    }
+    power_file <- file.path(path,'scitcem','WGS','LUNG','3p',sample,'power_estimates.txt')
+    if (file.exists(power_file)) { 
+      power.files[[sample]] <- read.table(power_file,header=1,sep='\t') %>%
+        dplyr::mutate(sample=sample)
+    }
+  }
+}
+
+calls <- do.call(rbind, cell.calls)
+
+power <- do.call(rbind,power.files) %>%
+  dplyr::group_by(sample) %>%
+  dplyr::summarise(est_TPR=mean(TPR),
+                   est_FPR=mean(FPR))
+```
+
+get LUNG scRNAseq data and annotations
+
+```{r get_data_LUNG}
+#['#ff7f0e', '#1f77b4', '#9b1ee3', '#d3d3d3']
+
+colors <- c('Tumor'='#ff7f0e','Normal'='#1f77b4',
+            'CNA'='#ff7f0e','CNN'='#1f77b4',
+            'tumor'='#ff7f0e','normal'='#1f77b4',
+            'normal_sample'='#d3d3d3')
+
+LUNG <- readRDS(file.path(path,'anno','LUNG','3p','epi_anno_new_umap.RDS'))
+LUNG <- subset(LUNG, subset=patient_id %in% donors)
+LUNG_3p_clones <- read.table(file.path(path,'anno','LUNG','3p','infercnv_clone_scores_nsclc.tsv'),header=1)
+
+donor_colors <- setNames(brewer.pal(length(donors),'Set3'),donors)
+
+LUNG <- AddMetaData(LUNG, LUNG_3p_clones %>%
+  dplyr::filter(!is.na(cell_id)) %>%
+  dplyr::select(cell_id,cna_clone) %>%
+  tibble::column_to_rownames('cell_id'))
+LUNG$cna_clone <- ifelse(is.na(LUNG$cna_clone),'CNN',LUNG$cna_clone)
+
+LUNG <- AddMetaData(LUNG, calls %>%
+                     dplyr::mutate(method='CCISM') %>%
+                     dplyr::select(call,cell_id,method) %>%
+                     spread(method,call) %>%
+                     tibble::remove_rownames() %>%
+                     tibble::column_to_rownames('cell_id'))
+
+LUNG$cna_clone <- factor(ifelse(LUNG$tissue_type=='Normal','normal_sample',LUNG$cna_clone), levels=c('CNA','CNN','normal_sample'))
+LUNG$CCISM <- factor(ifelse(LUNG$tissue_type=='Normal','normal_sample',LUNG$CCISM), levels=c('tumor','normal','normal_sample'))
+LUNG$combined_call <- factor(ifelse((LUNG$cna_clone=='CNA') | (LUNG$CCISM=='tumor'),'tumor','normal'),
+                            levels=c('normal','tumor'))
+```
+
+# tumor cells in UMAP 
+
+show LUNG data
+
+```{r LUNG_data,fig.width=4,fig.height=3,dev=c('svg','png')}
+LUNG$patient_id <- gsub('p0','P', LUNG$patient_id)
+names(donor_colors) <- gsub('p0','P',names(donor_colors))
+
+celltype_colors <- c("Tumor"="#ec3b3b",
+                     "AT2"="#035a8c",
+                     "AT1"="#2b8bbd",
+                     "Club"="#006c2b",
+                     "Ciliated"="#75c377",
+                     "Neuroendocrine"="#8655a5")
+
+DimPlot(LUNG, group.by='cell_type_epi', pt.size=2, cols=celltype_colors, raster=TRUE) +
+  coord_fixed()  +
+  plot_theme() + 
+  theme_void() + 
+  theme(legend.key.size=unit(3,'mm'))
+
+DimPlot(LUNG, group.by='tissue_type', pt.size=2,cols=colors, raster=TRUE) +
+  coord_fixed() + 
+  plot_theme() + 
+  theme_void() + 
+  theme(legend.key.size=unit(3,'mm'))
+
+DimPlot(LUNG, group.by='patient_id',pt.size=2,
+              cols=donor_colors,raster=TRUE, shuffle=TRUE) +
+  coord_fixed() + 
+  plot_theme() +
+  theme_void()  + 
+  theme(legend.key.size=unit(3,'mm'))
+
+DimPlot(LUNG,group.by='cna_clone',pt.size=2,
+              cols=colors, raster=TRUE, shuffle=TRUE)  +
+  coord_fixed() +
+  labs(title='inferCNV') + 
+  plot_theme() +
+  theme_void() + 
+  theme(legend.key.size=unit(3,'mm'))
+
+DimPlot(LUNG,group.by='CCISM',pt.size=2,
+              cols=colors, raster=TRUE, shuffle=TRUE)  +
+  coord_fixed() +
+  labs(title='CCISM') + 
+  plot_theme() +
+  theme_void() + 
+  theme(legend.key.size=unit(3,'mm'))
+```
+
+# compare inferCNV and scitcem
+
+measure performance by relative overlap between inferCNV and scitcem, and by tumor calls in normal samples; and compare estimated TPR
+
+```{r upset_plot,fig.width=8,fig.height=3}
+library('ComplexUpset')
+df <- calls %>% 
+  dplyr::filter(grepl('t',sample)) %>%
+  dplyr::left_join(LUNG_3p_clones,by='cell_id') %>%  
+  dplyr::mutate(donor=gsub('p0','P',gsub('[nt][12]*','',sample)),
+                sample2=gsub('[nt]','',sample)) %>%
+  dplyr::filter(!is.na(cna_clone)) %>%
+  dplyr::left_join(LUNG@meta.data %>%
+                     dplyr::select(cell_id,cell_type_epi),
+                   by='cell_id')
+
+p1 <- upset(df %>% dplyr::mutate(inferCNV=cna_clone=='CNA',
+                                 CCISM=call=='tumor'), 
+            c('inferCNV', 'CCISM'), 
+            set_sizes = FALSE, height_ratio = 1/5,
+            stripes = upset_stripes(
+              colors = 'white'),
+            base_annotations = list('Intersection size' = intersection_size(
+              counts = FALSE, 
+              mapping = aes(fill = donor), width = 0.8) +
+                scale_fill_manual(values = donor_colors) +
+                theme(panel.grid = element_blank(),
+                      legend.key.size=unit(3,'mm'),
+                      legend.title=element_blank(),
+                      axis.ticks = element_line('black'),
+                      axis.line = element_line()) + 
+                plot_theme()
+            )) + 
+  theme(panel.grid = element_blank()) +
+  plot_theme()
+
+
+p2 <- upset(df %>% dplyr::mutate(inferCNV=cna_clone=='CNA',
+                                 CCISM=call=='tumor'), 
+            c('inferCNV', 'CCISM'), 
+            set_sizes = FALSE, height_ratio = 1/5,
+            stripes = upset_stripes(
+              colors = 'white'),
+            base_annotations = list('Intersection size' = intersection_size(
+              counts = FALSE, 
+              mapping = aes(fill = cell_type_epi), width = 0.8) +
+                scale_fill_manual(values = celltype_colors) +
+                theme(panel.grid = element_blank(),
+                      legend.key.size=unit(3,'mm'),
+                      legend.title=element_blank(),
+                      axis.ticks = element_line('black'),
+                      axis.line = element_line()) + 
+                plot_theme() 
+            )) + 
+  theme(panel.grid = element_blank()) +
+  plot_theme()
+
+plot_grid(p1,p2,align='vh')
+```
+
+```{r performance,fig.width=4,fig.height=3}
+LUNG_stats <- calls %>% 
+  dplyr::left_join(LUNG_3p_clones,by='cell_id') %>%  
+  dplyr::mutate(donor=gsub('p0','P',gsub('[nt][12]*','',sample)),
+                sample2=gsub('[nt]','',sample)) %>%
+  dplyr::filter(!is.na(cna_clone)) %>%
+  dplyr::group_by(sample,sample2,donor) %>%
+  dplyr::summarise(both=sum((call=='tumor') & (cna_clone=='CNA'),na.rm=TRUE),
+                   either=sum((call=='tumor') | (cna_clone=='CNA'),na.rm=TRUE),
+                   exclusive=sum((call=='tumor') & (cna_clone=='CNN'),na.rm=TRUE),
+                   frac_called=mean(call=='tumor',na.rm=TRUE),
+                   frac_cna=mean(cna_clone=='CNA',na.rm=TRUE)) %>%
+  dplyr::mutate(overlap=both/either,
+                distinct=exclusive/either) %>%
+  dplyr::left_join(power,by=c('sample')) 
+
+ggplot(LUNG_stats, aes(x=overlap,y=est_TPR,fill=donor)) +
+  geom_point(size=3,alpha=.75,pch=21) + 
+  theme_classic() + 
+  theme(axis.text=element_text(size=8),
+        axis.title=element_text(size=9),
+        strip.text=element_text(size=9),
+        legend.margin=unit(1, 'mm'),
+        legend.key.size=unit(3,'mm'),
+        strip.background = element_rect(color = "black", fill=NA, size = 0)) + 
+  scale_fill_manual(values=donor_colors) +
+  coord_cartesian(xlim=c(0,1),ylim=c(0,1))  +
+  guides(fill=guide_legend(override.aes=list(pch=21,stroke=.5,size=3))) +
+  annotate(geom='text',x=1,y=0,
+           label=paste0('rho=',signif(cor(LUNG_stats$overlap,
+                                          LUNG_stats$est_TPR,
+                                          method='spearman',
+                                          use='na.or.complete'),2)),
+           hjust=1,vjust=0) +
+  labs(fill='',shape='',x='overlap CCISM / inferCNV', y='estimated TPR')
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
